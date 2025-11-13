@@ -1,0 +1,743 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>The Wedding of Eti & Agis - Minimalis Elegan</title>
+    <!-- Load Tailwind CSS from CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Load Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, setPersistence, browserSessionPersistence } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, addDoc, onSnapshot, collection, query, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Global Firebase variables will be defined by the environment
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let db;
+        let auth;
+        let userId = null;
+        let isAuthReady = false;
+
+        // Initialize Firebase and set up authentication
+        async function initFirebase() {
+            if (!firebaseConfig) {
+                console.error("Firebase configuration is missing.");
+                return;
+            }
+            
+            setLogLevel('Debug');
+            const app = initializeApp(firebaseConfig);
+            db = getFirestore(app);
+            auth = getAuth(app);
+            
+            // Listen for auth state changes
+            onAuthStateChanged(auth, (user) => {
+                if (user) {
+                    userId = user.uid;
+                    console.log("Firebase Auth Ready. User ID:", userId);
+                    // Start listening to guestbook data once authenticated
+                    setupGuestbookListener();
+                } else {
+                    // Fallback for unauthenticated state
+                    userId = `anon-${crypto.randomUUID()}`;
+                    console.log("Using anonymous ID:", userId);
+                    setupGuestbookListener(); // Still try to load public data
+                }
+                isAuthReady = true;
+            });
+
+            try {
+                // Attempt to sign in with custom token or anonymously
+                await setPersistence(auth, browserSessionPersistence);
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+            } catch (error) {
+                console.error("Firebase Auth Error:", error);
+            }
+        }
+
+        // --- Guestbook (Ucapan Tamu) Functionality ---
+        window.setupGuestbookListener = function() {
+            if (!db || !isAuthReady) {
+                console.log("Database or Auth not ready, skipping listener setup.");
+                return;
+            }
+
+            // Public data path for shared guestbook
+            const messagesRef = collection(db, 'artifacts', appId, 'public', 'data', 'wedding_eti_agis_messages');
+            const q = query(messagesRef);
+
+            // Real-time listener
+            onSnapshot(q, (snapshot) => {
+                const messagesContainer = document.getElementById('messages-container');
+                messagesContainer.innerHTML = ''; // Clear existing messages
+                const messages = [];
+
+                snapshot.forEach((doc) => {
+                    messages.push({ id: doc.id, ...doc.data() });
+                });
+
+                // Sort by timestamp descending for newest first (sort in memory as orderBy is restricted)
+                messages.sort((a, b) => (b.timestamp?.seconds || 0) - (a.timestamp?.seconds || 0));
+
+                if (messages.length === 0) {
+                    messagesContainer.innerHTML = '<p class="text-center text-gray-400 italic">Belum ada ucapan. Jadilah yang pertama!</p>';
+                    return;
+                }
+
+                messages.forEach(msg => {
+                    const messageElement = document.createElement('div');
+                    messageElement.className = 'p-4 bg-white/10 rounded-lg shadow-md mb-4 animate-fadeIn';
+                    const time = msg.timestamp ? new Date(msg.timestamp.seconds * 1000).toLocaleDateString('id-ID', { day: '2-digit', month: 'short', year: 'numeric' }) : 'Baru saja';
+                    
+                    messageElement.innerHTML = `
+                        <div class="flex justify-between items-start">
+                            <h4 class="font-serif text-xl font-semibold text-amber-300">${msg.name || 'Anonim'}</h4>
+                            <span class="text-xs text-gray-400 mt-1">${time}</span>
+                        </div>
+                        <p class="text-sm italic text-gray-300 mb-2 mt-1">${msg.status === 'Hadir' ? 'Mengkonfirmasi Kehadiran' : 'Doa Terbaik'}</p>
+                        <p class="text-gray-200 leading-relaxed">${msg.message || ''}</p>
+                    `;
+                    messagesContainer.appendChild(messageElement);
+                });
+            }, (error) => {
+                console.error("Error listening to guestbook:", error);
+                document.getElementById('messages-container').innerHTML = '<p class="text-center text-red-400">Gagal memuat ucapan tamu.</p>';
+            });
+        }
+
+        window.submitGuestbook = async function(event) {
+            event.preventDefault();
+            const form = document.getElementById('guestbook-form');
+            const name = form.name.value.trim();
+            const message = form.message.value.trim();
+            const status = form.status.value;
+            
+            if (!name || !message) {
+                alertModal("Peringatan", "Nama dan Ucapan wajib diisi.");
+                return;
+            }
+
+            if (!db) {
+                alertModal("Error", "Sistem database belum siap. Mohon tunggu sebentar.");
+                return;
+            }
+
+            try {
+                const messagesRef = collection(db, 'artifacts', appId, 'public', 'data', 'wedding_eti_agis_messages');
+                await addDoc(messagesRef, {
+                    name,
+                    message,
+                    status,
+                    timestamp: serverTimestamp(),
+                    senderId: userId,
+                    // Optionally store device/browser info for filtering/moderation
+                });
+                alertModal("Sukses!", "Ucapan Anda telah terkirim. Terima kasih atas do'anya.");
+                form.reset();
+            } catch (error) {
+                console.error("Error submitting message:", error);
+                alertModal("Error", "Gagal mengirim ucapan. Silakan coba lagi.");
+            }
+        }
+
+        // Initialize Firebase on window load
+        window.addEventListener('load', initFirebase);
+    </script>
+
+    <!-- Configure Tailwind -->
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        'navy-primary': '#0F172A', // Slate 900
+                        'accent-gold': '#D97706', // Amber 600
+                        'soft-bg': '#F8F8F8', // Soft off-white
+                    },
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                        serif: ['Playfair Display', 'serif'], // Elegant secondary font
+                    },
+                    animation: {
+                        'fadeIn': 'fadeIn 0.8s ease-out forwards',
+                        'slideUp': 'slideUp 0.8s ease-out forwards',
+                    },
+                    keyframes: {
+                        fadeIn: {
+                            '0%': { opacity: 0 },
+                            '100%': { opacity: 1 },
+                        },
+                        slideUp: {
+                            '0%': { transform: 'translateY(20px)', opacity: 0 },
+                            '100%': { transform: 'translateY(0)', opacity: 1 },
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        /* General Styling */
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #F8F8F8; /* Soft background */
+        }
+        
+        /* Custom Font Import (Optional: using system fonts first) */
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@100..900&family=Playfair+Display:ital,wght@0,400..900;1,400..900&display=swap');
+
+        /* Scroll Animation Visibility */
+        .hidden-on-load {
+            opacity: 0;
+            transform: translateY(20px);
+            transition: opacity 0.8s ease-out, transform 0.8s ease-out;
+        }
+        .visible-on-scroll {
+            opacity: 1;
+            transform: translateY(0);
+        }
+
+        /* Parallax Styling for Hero Image */
+        .parallax-hero {
+            background-image: url(Gambar/ST\ 3.jpeg);
+            background-size: cover;
+            background-position: center 30%; /* Adjust to focus on the couple */
+            background-repeat: no-repeat;
+            height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            /* Apply fixed background for parallax on desktop, scroll on mobile for performance */
+            background-attachment: scroll;
+        }
+
+        @media (min-width: 640px) { /* sm breakpoint */
+            .parallax-hero {
+                background-attachment: fixed;
+            }
+        }
+        
+        /* Scrollbar styling for a cleaner look */
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #F8F8F8;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #cbd5e1;
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #94a3b8;
+        }
+        
+        /* Elegant Border/Divider style */
+        .divider {
+            height: 1px;
+            width: 100px;
+            background-color: #D97706;
+            margin: 1.5rem auto;
+            opacity: 0.5;
+        }
+        
+        /* Modal Backdrop */
+        .modal-backdrop {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.7);
+            z-index: 1000;
+            display: none;
+            justify-content: center;
+            align-items: center;
+        }
+
+    </style>
+</head>
+<body class="text-navy-primary antialiased">
+
+    <!-- Audio Player (Hidden) -->
+    <audio id="background-music" loop preload="auto">
+        <!-- Using a royalty-free music link as requested (Bensound - Inspire) -->
+        <source src="Musik/mj6gLTlZ7tFu.128.mp3" type="audio/mpeg">
+        <p>Your browser does not support the audio element.</p>
+    </audio>
+
+    <!-- Custom Modal for Alerts/Confirmations -->
+    <div id="custom-modal" class="modal-backdrop">
+        <div class="bg-white p-6 rounded-xl shadow-2xl max-w-sm w-11/12 transform transition-all duration-300 scale-95 opacity-0">
+            <h3 id="modal-title" class="text-2xl font-serif font-bold mb-3 text-navy-primary"></h3>
+            <p id="modal-message" class="text-gray-700 mb-6"></p>
+            <div class="flex justify-end">
+                <button onclick="closeModal()" class="px-5 py-2 bg-navy-primary text-white font-semibold rounded-lg hover:bg-navy-primary/90 transition duration-200 shadow-md">Tutup</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 1. COVER PAGE -->
+    <section id="cover-page" class="fixed inset-0 bg-navy-primary flex flex-col justify-center items-center text-white z-50 transition-opacity duration-1000">
+        <!-- Hero Image Placeholder for Cover (Mobile first aspect ratio) -->
+        <div class="absolute inset-0 bg-cover bg-center opacity-30" style="background-image: url(Gambar/ST\ 3.jpeg);"></div>
+        <div class="relative text-center p-8">
+            <p class="font-serif text-2xl font-light mb-3 animate-fadeIn">The Wedding Of</p>
+            <h1 class="font-serif text-7xl md:text-8xl font-bold tracking-tight mb-4 animate-fadeIn" style="animation-delay: 0.2s;">Eti & Agis</h1>
+            <div class="divider bg-accent-gold w-20 mx-auto opacity-100 animate-fadeIn" style="animation-delay: 0.4s;"></div>
+            <p class="text-sm tracking-widest uppercase mt-4 mb-8 animate-fadeIn" style="animation-delay: 0.6s;">23 November 2025</p>
+            
+            <!-- Dynamic Guest Name -->
+            <p id="guest-greeting" class="text-md mt-6 mb-8 p-3 rounded-lg bg-white/10 italic animate-fadeIn" style="animation-delay: 0.8s;">
+                Kepada Yth.<br><span class="font-semibold text-lg" id="to-name">[Bapak Ibu]</span>
+            </p>
+            
+            <button id="open-button" onclick="handleOpenInvitation()" class="mt-8 px-8 py-3 bg-accent-gold text-navy-primary font-semibold rounded-lg shadow-xl hover:bg-amber-400 transition transform hover:scale-105 duration-300 uppercase tracking-wider animate-fadeIn" style="animation-delay: 1s;">
+                Buka Undangan
+            </button>
+        </div>
+    </section>
+
+    <!-- 2. MAIN CONTENT (Initially Hidden) -->
+    <div id="main-content" class="min-h-screen hidden">
+        
+        <!-- Sticky Music Toggle Button -->
+        <button id="music-toggle" onclick="toggleMusic(this)" class="fixed bottom-4 right-4 z-40 p-3 rounded-full bg-navy-primary text-accent-gold shadow-2xl transition duration-300 hover:scale-110">
+            <!-- Icon: Volume Off (Initial State) -->
+            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><line x1="22" y1="9" x2="16" y2="15"></line><line x1="16" y1="9" x2="22" y2="15"></line></svg>
+        </button>
+
+        <!-- 2.1 HERO SECTION (Parallax) -->
+        <header class="parallax-hero relative text-white text-center" id="hero-section">
+            <div class="absolute inset-0 bg-navy-primary opacity-60"></div>
+            <div class="relative z-10 p-4 w-full">
+                <p class="font-serif text-lg font-light mb-3 hidden-on-load">We Are Getting Married</p>
+                <h1 class="font-serif text-5xl md:text-7xl font-bold tracking-tighter hidden-on-load">Eti & Agis</h1>
+                <div class="divider bg-accent-gold w-16 mx-auto opacity-100 hidden-on-load"></div>
+                
+                <!-- Countdown Timer -->
+                <div id="countdown" class="mt-8 flex justify-center space-x-4 hidden-on-load">
+                    <!-- Timer blocks will be populated by JS -->
+                </div>
+                <p class="text-sm uppercase tracking-widest mt-4 hidden-on-load">Minggu, 23 November 2025</p>
+            </div>
+        </header>
+
+        <main class="max-w-4xl mx-auto px-4 py-12 md:py-20">
+
+            <!-- 2.2 INVITATION QUOTE / VERSE -->
+            <section class="text-center hidden-on-load mt-8" data-animation="slideUp">
+                <p class="text-lg md:text-xl font-serif italic text-gray-700 leading-relaxed max-w-2xl mx-auto">
+                    "Dan di antara tanda-tanda kekuasaan-Nya ialah Dia menciptakan untukmu isteri-isteri dari jenismu sendiri, supaya kamu cenderung dan merasa tenteram kepadanya, dan dijadikan-Nya diantaramu rasa kasih dan sayang. Sesungguhnya pada yang demikian itu benar-benar terdapat tanda-tanda bagi kaum yang berfikir."
+                </p>
+                <p class="text-sm mt-3 text-accent-gold font-semibold">
+                    (QS. Ar-Rum: 21)
+                </p>
+            </section>
+            
+            <!-- 2.3 THE COUPLE -->
+            <section class="mt-16 md:mt-24 text-center hidden-on-load" data-animation="slideUp">
+                <h2 class="text-4xl font-serif font-bold text-navy-primary">Mempelai</h2>
+                <div class="divider"></div>
+
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-10 mt-12">
+                    <!-- Bride - Eti -->
+                    <div class="p-6">
+                        <p class="text-sm uppercase tracking-widest text-accent-gold mb-2">Mempelai Wanita</p>
+                        <h3 class="font-serif text-5xl font-bold text-navy-primary">Eti</h3>
+                        <p class="text-2xl font-serif text-gray-700">Eti Hariyati</p>
+                        <p class="text-sm mt-4 text-gray-500">Putri dari: <br>Bapak Halili (Alm) & Ibu Sri Murni (Almh)</p>
+                    </div>
+
+                    <!-- Groom - Agis -->
+                    <div class="p-6">
+                        <p class="text-sm uppercase tracking-widest text-accent-gold mb-2">Mempelai Pria</p>
+                        <h3 class="font-serif text-5xl font-bold text-navy-primary">Agis</h3>
+                        <p class="text-2xl font-serif text-gray-700">Ahmad Afrizqi Agis Pratama</p>
+                        <p class="text-sm mt-4 text-gray-500">Putra dari: <br>Bapak Adnan, S.Sos & Ibu Hernawati (Almh)</p>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 2.4 EVENT DETAILS -->
+            <section class="mt-16 md:mt-24 text-center hidden-on-load" data-animation="slideUp">
+                <h2 class="text-4xl font-serif font-bold text-navy-primary">Detail Acara</h2>
+                <div class="divider"></div>
+
+                <p class="text-lg md:text-xl font-serif italic text-gray-700 mt-6 max-w-2xl mx-auto">
+                    Dengan memohon rahmat dan ridho Allah SWT, kami mengundang Bapak/Ibu/Saudara/i untuk hadir.
+                </p>
+                <p class="text-sm uppercase tracking-widest text-accent-gold mt-2">
+                    SAVAH Hidden Glamping & Eatery - Pagesangan Mataram
+                </p>
+
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-8 mt-12">
+                    <!-- Akad Nikah -->
+                    <div class="p-8 bg-white rounded-xl shadow-lg border-t-4 border-accent-gold transition duration-300 hover:shadow-xl">
+                        <h3 class="text-3xl font-serif font-bold text-navy-primary mb-3">Akad Nikah</h3>
+                        <p class="text-5xl font-serif font-extrabold text-accent-gold">16:00</p>
+                        <p class="text-sm uppercase tracking-widest text-gray-500 mb-6">WIB</p>
+                        <p class="text-md font-semibold text-gray-700">Minggu, 23 November 2025</p>
+                        <p class="text-sm text-gray-500 mt-1">SAVAH Hidden Glamping & Eatery</p>
+                    </div>
+
+                    <!-- Resepsi -->
+                    <div class="p-8 bg-white rounded-xl shadow-lg border-t-4 border-accent-gold transition duration-300 hover:shadow-xl">
+                        <h3 class="text-3xl font-serif font-bold text-navy-primary mb-3">Resepsi</h3>
+                        <p class="text-5xl font-serif font-extrabold text-accent-gold">19:30</p>
+                        <p class="text-sm uppercase tracking-widest text-gray-500 mb-6">WIB</p>
+                        <p class="text-md font-semibold text-gray-700">Minggu, 23 November 2025</p>
+                        <p class="text-sm text-gray-500 mt-1">SAVAH Hidden Glamping & Eatery</p>
+                    </div>
+                </div>
+                
+                <!-- Google Maps & Calendar Button -->
+                <div class="mt-12">
+                    <iframe src="https://www.google.com/maps/embed?pb=!1m18!1m12!1m3!1d3945.368817658739!2d116.11181757529322!3d-8.583091991436152!2m3!1f0!2f0!3f0!3m2!1i1024!2i768!4f13.1!3m3!1m2!1s0x2dcdb79f2257253b%3A0x28636413d11b228b!2sSAVAH%20Hidden%20Glamping%20%26%20Eatery!5e0!3m2!1sen!2sid!4v1700000000000!5m2!1sen!2sid" width="100%" height="350" style="border:0; border-radius: 12px; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1);" allowfullscreen="" loading="lazy" referrerpolicy="no-referrer-when-downgrade"></iframe>
+                    
+                    <a href="https://maps.app.goo.gl/UdsbsckypYfiAWr67" target="_blank" class="inline-block mt-6 px-6 py-2 bg-navy-primary text-white font-semibold rounded-lg hover:bg-navy-primary/90 transition duration-300 shadow-md">
+                        Lihat Lokasi di Google Maps
+                    </a>
+                </div>
+            </section>
+
+            <!-- 2.5 LOVE STORY -->
+            <section class="mt-16 md:mt-24 text-center hidden-on-load" data-animation="slideUp">
+                <h2 class="text-4xl font-serif font-bold text-navy-primary">Our Love Story</h2>
+                <div class="divider"></div>
+
+                <div class="text-left text-gray-700 max-w-3xl mx-auto mt-8 space-y-4 leading-relaxed">
+                    <p>Tahun 2004 adalah awal perkenalan kami di masa kecil dulu dan menjadi sahabat pada saat itu. Banyak momen lucu, menegangkan, dan kesenangan pada masa itu. Setelah beranjak SMP, tepat di kelas tiga saat kelulusan, kami berpisah dan tidak bertemu lagi serta tidak ada komunikasi. Yang awalnya kita adalah teman kecil berubah menjadi orang lain, kami menjalani kehidupan masing-masing sampai dewasa.</p>
+                    
+                    <p>Sampai pada waktunya saat itu tahun 2024, saya (Agis) mencoba menghubungi dia (Eti) kembali melalui Instagram, hanya sebatas say hello dan tanya kabar saja, dan dia merespon dengan baik. Setelah itu, grup WhatsApp SD kita mengundang untuk reuni di kafe di Mataram, di sanalah kami bertemu kembali. Pada saat itu saya sedang cuti bekerja dan pulang kembali ke Indonesia untuk beberapa hari. Setelah reuni, kami saling bercerita tentang kehidupan dan percintaan kita masing-masing yang mungkin saat itu sedang tidak baik-baik saja.</p>
+                    
+                    <p>Saat itu dia pernah bilang kepada saya bahwa dia dulu menyukai saya pada saat kecil (ya mungkin cinta monyet). Muncul dari lubuk hati saya yang paling dalam dan berkata kepada dia karena beberapa hari lagi saya harus kembali ke luar negeri, "Eti, kalau tahun depan kamu belum menikah, dan saya belum menikah, saya akan kembali ke Indonesia dan ayo kita saja yang menikah. Saya sudah tahu kamu dan kamu juga sudah tahu saya, insyaAllah kita berjuang bersama, tidak perlu membuang waktu untuk mengenal orang baru lagi," dan dia belum merespon apa-apa.</p>
+
+                    <p>Sampai saat tepat tanggal 16 September 2025 di Nangkring Cafe, kami berdua *deeptalk* dan saat itu Eti menagih janji yang sudah saya bilang ke dia tahun lalu, "Sekarang kamu sudah menetap di Indonesia, sudah pulang, mana janjimu untuk nikahin saya?" Dan saya menjawabnya iya, saya akan menepati janji saya. Atas dukungan orang terdekat, dan banyak berdiskusi satu sama lain, kami memutuskan untuk melanjutkan ke jenjang yang lebih serius. Banyak yang harus kita berdua korbankan dan semoga Allah dapat melancarkan niat baik dan tulus kami berdua ini, Amin.</p>
+                </div>
+            </section>
+
+            <!-- 2.6 GALLERY (6 Photo Links) -->
+            <section class="mt-16 md:mt-24 text-center hidden-on-load" data-animation="slideUp">
+                <h2 class="text-4xl font-serif font-bold text-navy-primary">Galeri Kisah Kami</h2>
+                <div class="divider"></div>
+                
+                <!-- NOTE: The provided Google Drive links are not direct image links. Using placeholders. -->
+                <div class="grid grid-cols-2 md:grid-cols-3 gap-3 mt-8">
+                    <img src="Gambar/BL 3.jpeg" alt="Galeri Foto 1" class="w-full h-auto object-cover rounded-lg shadow-md hover:scale-105 transition duration-300">
+                    <img src="Gambar/ST 2.jpeg" alt="Galeri Foto 2" class="w-full h-auto object-cover rounded-lg shadow-md hover:scale-105 transition duration-300">
+                    <img src="Gambar/CLIF 2.jpeg" alt="Galeri Foto 3" class="w-full h-auto object-cover rounded-lg shadow-md hover:scale-105 transition duration-300">
+                    <img src="Gambar/CF 3.jpeg" alt="Galeri Foto 4" class="w-full h-auto object-cover rounded-lg shadow-md hover:scale-105 transition duration-300">
+                    <img src="Gambar/ST 6.jpeg" alt="Galeri Foto 5" class="w-full h-auto object-cover rounded-lg shadow-md hover:scale-105 transition duration-300">
+                    <img src="Gambar/ST 5.jpeg" alt="Galeri Foto 6" class="w-full h-auto object-cover rounded-lg shadow-md hover:scale-105 transition duration-300">
+                </div>
+                <p class="text-xs text-gray-400 italic mt-4">
+                    *Tautan Google Drive tidak dapat diakses publik, sehingga menggunakan placeholder foto.
+                </p>
+            </section>
+            
+            <!-- 2.7 WEDDING GIFT (Amplop Digital) -->
+            <section class="mt-16 md:mt-24 text-center p-8 bg-navy-primary text-white rounded-xl shadow-2xl hidden-on-load" data-animation="slideUp">
+                <h2 class="text-4xl font-serif font-bold text-accent-gold">Wedding Gift</h2>
+                <div class="divider bg-white"></div>
+                
+                <p class="text-gray-300 max-w-2xl mx-auto mt-6">
+                    Bagi Bapak/Ibu/Saudara/i yang ingin memberikan hadiah, kami menyediakan fasilitas transfer digital. Do'a restu Anda adalah karunia terindah bagi kami.
+                </p>
+
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mt-8">
+                    <!-- Bank Agis (BCA) -->
+                    <div class="bg-navy-primary/70 p-5 rounded-lg border border-accent-gold/50">
+                        <p class="text-lg font-semibold text-white mb-2">BCA</p>
+                        <p class="text-sm text-gray-300">A/N Ahmad Afrizqi Agis Pratama</p>
+                        <p id="bca-number" class="text-2xl font-bold text-accent-gold my-2">056 231 2143</p>
+                        <button onclick="copyToClipboard('bca-number', this)" class="text-xs px-3 py-1 bg-accent-gold text-navy-primary rounded-full hover:bg-amber-400 transition duration-200">
+                            Salin Rekening
+                        </button>
+                    </div>
+
+                    <!-- Bank Eti (Mandiri) -->
+                    <div class="bg-navy-primary/70 p-5 rounded-lg border border-accent-gold/50">
+                        <p class="text-lg font-semibold text-white mb-2">Mandiri</p>
+                        <p class="text-sm text-gray-300">A/N Eti Hariyati</p>
+                        <p id="mandiri-number" class="text-2xl font-bold text-accent-gold my-2">161 000 315 6150</p>
+                        <button onclick="copyToClipboard('mandiri-number', this)" class="text-xs px-3 py-1 bg-accent-gold text-navy-primary rounded-full hover:bg-amber-400 transition duration-200">
+                            Salin Rekening
+                        </button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 2.8 RSVP Form (Mockup - can be connected to the guestbook logic if needed) -->
+            <!-- Placeholder section for RSVP - often combined with Guestbook in this minimalist style -->
+            <section class="mt-16 md:mt-24 text-center hidden-on-load" data-animation="slideUp">
+                <h2 class="text-4xl font-serif font-bold text-navy-primary">Konfirmasi Kehadiran</h2>
+                <div class="divider"></div>
+                
+                <p class="text-gray-700 max-w-2xl mx-auto mt-6">
+                    Kami berharap Bapak/Ibu/Saudara/i dapat hadir. Mohon konfirmasi kehadiran Anda.
+                </p>
+                
+                <!-- The attendance status is integrated into the Guestbook form below -->
+                <p class="text-sm mt-4 text-accent-gold italic">
+                    (Silakan gunakan bagian 'Ucapan Tamu' di bawah untuk konfirmasi kehadiran Anda.)
+                </p>
+            </section>
+            
+            <!-- 2.9 GUESTBOOK / UCAPAN TAMU (FIREBASE INTEGRATED) -->
+            <section class="mt-16 md:mt-24 p-6 bg-navy-primary rounded-xl shadow-2xl hidden-on-load" data-animation="slideUp">
+                <div class="text-center text-white">
+                    <h2 class="text-4xl font-serif font-bold text-accent-gold">Ucapan & Do'a</h2>
+                    <div class="divider bg-white"></div>
+                    <p class="text-gray-300 max-w-2xl mx-auto mt-4 mb-8">
+                        Mohon Do'a Nya agar kami dapat membangun rumah tangga yang sakinah, mawaddah, dan warahmah. Silahkan tuliskan ucapan terbaik Bapak/i di Bawah ini
+                    </p>
+                </div>
+                
+                <!-- Guestbook Form -->
+                <form id="guestbook-form" onsubmit="submitGuestbook(event)" class="space-y-4 max-w-xl mx-auto">
+                    <div>
+                        <input type="text" id="name" name="name" placeholder="Nama Anda" required class="w-full p-3 rounded-lg bg-white/90 text-navy-primary focus:ring-accent-gold focus:border-accent-gold border-gray-300 transition duration-200">
+                    </div>
+                    <div>
+                        <select id="status" name="status" class="w-full p-3 rounded-lg bg-white/90 text-navy-primary focus:ring-accent-gold focus:border-accent-gold border-gray-300 transition duration-200">
+                            <option value="Hadir">Saya akan Hadir</option>
+                            <option value="Tidak Hadir">Mohon Maaf, Tidak Dapat Hadir</option>
+                        </select>
+                    </div>
+                    <div>
+                        <textarea id="message" name="message" rows="4" placeholder="Tulis ucapan dan do'a terbaik Anda di sini..." required class="w-full p-3 rounded-lg bg-white/90 text-navy-primary focus:ring-accent-gold focus:border-accent-gold border-gray-300 transition duration-200"></textarea>
+                    </div>
+                    <button type="submit" class="w-full py-3 bg-accent-gold text-navy-primary font-semibold rounded-lg hover:bg-amber-400 transition duration-300 shadow-lg uppercase tracking-wider">
+                        Kirim Ucapan
+                    </button>
+                </form>
+
+                <!-- Guestbook Messages Container (Real-time data from Firestore) -->
+                <div id="messages-container" class="mt-12 max-w-xl mx-auto h-96 overflow-y-auto p-4 rounded-lg bg-navy-primary/70 scrollbar-thin scrollbar-thumb-accent-gold scrollbar-track-navy-primary space-y-4">
+                    <!-- Messages will be populated by JavaScript (onSnapshot) -->
+                    <p class="text-center text-gray-400 italic">Memuat ucapan tamu...</p>
+                </div>
+            </section>
+
+
+        </main>
+        
+        <!-- FOOTER -->
+        <footer class="mt-16 py-8 bg-navy-primary text-center text-white">
+            <p class="font-serif text-3xl font-bold text-accent-gold mb-2">Eti & Agis</p>
+            <p class="text-xs uppercase tracking-widest text-gray-400">Kami yang Berbahagia</p>
+            <p class="text-sm mt-4 text-gray-500">
+                Created with <span class="text-red-500">❤️</span> | Digital Wedding Invitation
+            </p>
+        </footer>
+
+    </div>
+    
+    <!-- JavaScript for Interactivity -->
+    <script>
+        // Global variables
+        const weddingDate = new Date("2025-11-23T16:00:00").getTime();
+        const mainContent = document.getElementById('main-content');
+        const coverPage = document.getElementById('cover-page');
+        const audio = document.getElementById('background-music');
+        const musicToggle = document.getElementById('music-toggle');
+        const countdownElement = document.getElementById('countdown');
+        const toNameElement = document.getElementById('to-name');
+        const modal = document.getElementById('custom-modal');
+        const modalTitle = document.getElementById('modal-title');
+        const modalMessage = document.getElementById('modal-message');
+
+        // --- Core Functions ---
+
+        function getUrlParameter(name) {
+            name = name.replace(/[\[]/, '\\[').replace(/[\]]/, '\\]');
+            const regex = new RegExp('[\\?&]' + name + '=([^&#]*)');
+            const results = regex.exec(location.search);
+            return results === null ? '' : decodeURIComponent(results[1].replace(/\+/g, ' '));
+        }
+
+        window.alertModal = function(title, message) {
+            modalTitle.textContent = title;
+            modalMessage.textContent = message;
+            modal.style.display = 'flex';
+            setTimeout(() => {
+                modal.querySelector('div').classList.remove('scale-95', 'opacity-0');
+                modal.querySelector('div').classList.add('scale-100', 'opacity-100');
+            }, 10);
+        }
+
+        window.closeModal = function() {
+            modal.querySelector('div').classList.remove('scale-100', 'opacity-100');
+            modal.querySelector('div').classList.add('scale-95', 'opacity-0');
+            setTimeout(() => {
+                modal.style.display = 'none';
+            }, 300);
+        }
+
+        window.handleOpenInvitation = function() {
+            // 1. Fade out cover page
+            coverPage.style.opacity = '0';
+            coverPage.style.pointerEvents = 'none';
+
+            // 2. Show main content after fade
+            setTimeout(() => {
+                coverPage.classList.add('hidden');
+                mainContent.classList.remove('hidden');
+                
+                // 3. Start Parallax, Countdown, and Music
+                setupParallax();
+                startCountdown();
+                setupScrollAnimations();
+                
+                // 4. Autoplay Music (must be called after user interaction)
+                try {
+                    audio.play().then(() => {
+                        updateMusicToggleIcon(true);
+                    }).catch(error => {
+                        console.log("Autoplay prevented. Music will start on next interaction.");
+                        updateMusicToggleIcon(false);
+                    });
+                } catch (e) {
+                    console.log("Audio play error:", e);
+                }
+            }, 1000);
+        }
+
+        // --- Music Controls ---
+        function updateMusicToggleIcon(isPlaying) {
+            musicToggle.innerHTML = isPlaying ? 
+                '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M19.07 4.93a10 10 0 0 1 0 14.14M22.84 1.16a15 15 0 0 0 0 21.68"></path></svg>' : 
+                '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><line x1="22" y1="9" x2="16" y2="15"></line><line x1="16" y1="9" x2="22" y2="15"></line></svg>';
+        }
+
+        window.toggleMusic = function(button) {
+            if (audio.paused) {
+                audio.play();
+                updateMusicToggleIcon(true);
+            } else {
+                audio.pause();
+                updateMusicToggleIcon(false);
+            }
+        }
+
+        // --- Parallax Effect ---
+        function setupParallax() {
+            const hero = document.getElementById('hero-section');
+            if (!hero) return;
+
+            window.addEventListener('scroll', () => {
+                const scrollPosition = window.pageYOffset;
+                // Simple vertical movement for parallax effect
+                hero.style.backgroundPositionY = 30 + scrollPosition * 0.1 + '%';
+            });
+        }
+        
+        // --- Countdown Timer ---
+        function formatTime(t) {
+            return t < 10 ? '0' + t : t;
+        }
+
+        function renderCountdown(days, hours, minutes, seconds) {
+            countdownElement.innerHTML = `
+                ${createTimeBlock(formatTime(days), 'Hari')}
+                ${createTimeBlock(formatTime(hours), 'Jam')}
+                ${createTimeBlock(formatTime(minutes), 'Menit')}
+                ${createTimeBlock(formatTime(seconds), 'Detik')}
+            `;
+        }
+        
+        function createTimeBlock(value, label) {
+            return `
+                <div class="p-3 md:p-4 bg-white/20 rounded-lg shadow-lg backdrop-blur-sm text-center w-20 transition duration-300 hover:scale-105">
+                    <p class="text-4xl font-bold font-mono">${value}</p>
+                    <p class="text-xs uppercase mt-1">${label}</p>
+                </div>
+            `;
+        }
+
+        function startCountdown() {
+            const updateTimer = setInterval(function() {
+                const now = new Date().getTime();
+                const distance = weddingDate - now;
+
+                const days = Math.floor(distance / (1000 * 60 * 60 * 24));
+                const hours = Math.floor((distance % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+                const minutes = Math.floor((distance % (1000 * 60 * 60)) / (1000 * 60));
+                const seconds = Math.floor((distance % (1000 * 60)) / 1000);
+
+                if (distance < 0) {
+                    clearInterval(updateTimer);
+                    countdownElement.innerHTML = '<p class="text-3xl font-serif font-bold text-accent-gold">Happy Wedding Day!</p>';
+                } else {
+                    renderCountdown(days, hours, minutes, seconds);
+                }
+            }, 1000);
+        }
+        
+        // --- Scroll Animations (Intersection Observer) ---
+        function setupScrollAnimations() {
+            const elements = document.querySelectorAll('[data-animation]');
+            const observer = new IntersectionObserver((entries, observer) => {
+                entries.forEach(entry => {
+                    if (entry.isIntersecting) {
+                        entry.target.classList.add('visible-on-scroll');
+                        observer.unobserve(entry.target);
+                    }
+                });
+            }, {
+                rootMargin: '0px',
+                threshold: 0.1 // Trigger when 10% of the element is visible
+            });
+
+            elements.forEach(el => {
+                el.classList.add('hidden-on-load');
+                observer.observe(el);
+            });
+        }
+        
+        // --- Utility ---
+        window.copyToClipboard = function(elementId, button) {
+            const textToCopy = document.getElementById(elementId).innerText;
+            try {
+                // Using document.execCommand('copy') for better compatibility in iframe environments
+                const textarea = document.createElement('textarea');
+                textarea.value = textToCopy;
+                document.body.appendChild(textarea);
+                textarea.select();
+                document.execCommand('copy');
+                document.body.removeChild(textarea);
+
+                const originalText = button.textContent;
+                button.textContent = 'Tersalin!';
+                setTimeout(() => {
+                    button.textContent = originalText;
+                }, 1500);
+            } catch (err) {
+                alertModal("Error", "Gagal menyalin nomor rekening. Silakan salin secara manual: " + textToCopy);
+            }
+        }
+
+
+        // --- Initialization on Load ---
+        document.addEventListener('DOMContentLoaded', () => {
+            // Get 'to' parameter from URL (e.g., ?to=Nama_Tamu)
+            const guestName = getUrlParameter('to') || 'Bapak/Ibu/Saudara/i';
+            toNameElement.textContent = guestName;
+            
+            // Initial check for scrollable elements
+            setupScrollAnimations();
+        });
+        
+    </script>
+</body>
+</html>
